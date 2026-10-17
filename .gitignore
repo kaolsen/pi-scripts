@@ -1,0 +1,9 @@
+# Hemmeligheder — må aldrig i git
+config.php
+*_config.php
+*.env
+
+# Logfiler og midlertidigt
+*.log
+__pycache__/
+*.pyc
