@@ -6,6 +6,8 @@
  *   php vandstand_collect.php            # normal kørsel (fra seneste måling)
  *   php vandstand_collect.php --dage=30  # hent historik bagud
  *   php vandstand_collect.php --test     # vis data, skriv intet i databasen
+ *   php vandstand_collect.php --fra=2023-10-19 --til=2023-10-22
+ *                                        # hent en bestemt periode (danske datoer, til-dagen med)
  *
  * Cron (hvert 10. min, 3 min efter DMI's måletidspunkt):
  *   3-59/10 * * * * php /home/kao/scripts/vandstand_collect.php >> /home/kao/scripts/vandstand.log 2>&1
@@ -23,9 +25,24 @@ const OVERLAP_H  = 2;                          // hent lidt bagud — DMI kan ef
 const START_DAGE = 7;                          // første kørsel uden data
 
 // ---- Argumenter ---------------------------------------------------------
-$opt   = getopt('', ['dage:', 'test']);
+$opt   = getopt('', ['dage:', 'test', 'fra:', 'til:']);
 $test  = isset($opt['test']);
 $dage  = isset($opt['dage']) ? max(1, (int)$opt['dage']) : null;
+
+// --fra/--til: danske datoer → UTC-tidspunkter til DMI's datetime-filter
+$periodeFra = $periodeTil = null;
+if (isset($opt['fra'])) {
+    $tz = new DateTimeZone('Europe/Copenhagen');
+    $f  = DateTime::createFromFormat('!Y-m-d', $opt['fra'], $tz);
+    $t  = DateTime::createFromFormat('!Y-m-d', $opt['til'] ?? $opt['fra'], $tz);
+    if (!$f || !$t) {
+        fwrite(STDERR, "Brug datoformat ÅÅÅÅ-MM-DD, fx --fra=2023-10-19 --til=2023-10-22\n");
+        exit(1);
+    }
+    $t->modify('+1 day');                              // til-dagen med
+    $periodeFra = gmdate('Y-m-d\TH:i:s\Z', $f->getTimestamp());
+    $periodeTil = gmdate('Y-m-d\TH:i:s\Z', $t->getTimestamp());
+}
 
 function logmsg(string $s): void {
     echo gmdate('Y-m-d H:i:s'), ' UTC  ', $s, PHP_EOL;
@@ -75,7 +92,10 @@ $upsert = $pdo->prepare(
 $total = 0;
 foreach (STATIONER as $st) {
     foreach (PARAMETRE as $par) {
-        if ($dage !== null) {
+        $til = '..';
+        if ($periodeFra !== null) {
+            [$fra, $til] = [$periodeFra, $periodeTil];
+        } elseif ($dage !== null) {
             $fra = gmdate('Y-m-d\TH:i:s\Z', time() - $dage * 86400);
         } else {
             $sidste->execute([$st, $par]);
@@ -88,7 +108,7 @@ foreach (STATIONER as $st) {
         $url = API . '?' . http_build_query([
             'stationId'   => $st,
             'parameterId' => $par,
-            'datetime'    => $fra . '/..',
+            'datetime'    => $fra . '/' . $til,
             'limit'       => 300000,
         ]);
 
@@ -100,6 +120,7 @@ foreach (STATIONER as $st) {
         }
 
         $n = 0;
+        $maks = null;
         if (!$test) $pdo->beginTransaction();
         foreach ($json['features'] as $f) {
             $p = $f['properties'];
@@ -112,6 +133,7 @@ foreach (STATIONER as $st) {
                 ':qs' => $p['qcStatus'] ?? null,
                 ':qr' => $p['qcResult'] ?? null,
             ];
+            if ($maks === null || $p['value'] > $maks[0]) $maks = [$p['value'], $p['observed']];
             if ($test) {
                 if ($n < 3) echo '  ', implode(' | ', $row), PHP_EOL;
             } else {
@@ -121,7 +143,8 @@ foreach (STATIONER as $st) {
         }
         if (!$test) $pdo->commit();
 
-        logmsg(sprintf('%s/%-10s %5d rækker fra %s', $st, $par, $n, $fra));
+        logmsg(sprintf('%s/%-10s %5d rækker fra %s%s', $st, $par, $n, $fra,
+            $til !== '..' ? " til $til" : '') . ($maks ? sprintf('  (maks %s kl. %s UTC)', $maks[0], $maks[1]) : ''));
         $total += $n;
     }
 }
