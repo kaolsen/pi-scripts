@@ -8,6 +8,8 @@
  *   php vandstand_collect.php --test     # vis data, skriv intet i databasen
  *   php vandstand_collect.php --fra=2023-10-19 --til=2023-10-22
  *                                        # hent en bestemt periode (danske datoer, til-dagen med)
+ *   php vandstand_collect.php --fra=1996-01-01 --til=2026-10-17
+ *                                        # lange perioder hentes automatisk i bidder af 180 døgn
  *
  * Cron (hvert 10. min, 3 min efter DMI's måletidspunkt):
  *   3-59/10 * * * * php /home/kao/scripts/vandstand_collect.php >> /home/kao/scripts/vandstand.log 2>&1
@@ -40,8 +42,20 @@ if (isset($opt['fra'])) {
         exit(1);
     }
     $t->modify('+1 day');                              // til-dagen med
-    $periodeFra = gmdate('Y-m-d\TH:i:s\Z', $f->getTimestamp());
-    $periodeTil = gmdate('Y-m-d\TH:i:s\Z', $t->getTimestamp());
+    $periodeFra = $f->getTimestamp();
+    $periodeTil = min($t->getTimestamp(), time());
+}
+
+/**
+ * Deler [fra, til] i bidder på højst 180 døgn. DMI giver max 300.000 målinger pr.
+ * kald, og 180 døgn × 144 målinger/døgn = ca. 26.000 — god margen, korte kald.
+ */
+function bidder(int $fra, int $til): array {
+    $ud = [];
+    for ($a = $fra; $a < $til; $a += 180 * 86400) {
+        $ud[] = [gmdate('Y-m-d\TH:i:s\Z', $a), gmdate('Y-m-d\TH:i:s\Z', min($a + 180 * 86400, $til))];
+    }
+    return $ud;
 }
 
 function logmsg(string $s): void {
@@ -92,59 +106,67 @@ $upsert = $pdo->prepare(
 $total = 0;
 foreach (STATIONER as $st) {
     foreach (PARAMETRE as $par) {
-        $til = '..';
         if ($periodeFra !== null) {
-            [$fra, $til] = [$periodeFra, $periodeTil];
+            $stykker = bidder($periodeFra, $periodeTil);        // lang periode i bidder
         } elseif ($dage !== null) {
-            $fra = gmdate('Y-m-d\TH:i:s\Z', time() - $dage * 86400);
+            $stykker = [[gmdate('Y-m-d\TH:i:s\Z', time() - $dage * 86400), '..']];
         } else {
             $sidste->execute([$st, $par]);
             $max = $sidste->fetchColumn();
-            $fra = $max
+            $stykker = [[$max
                 ? gmdate('Y-m-d\TH:i:s\Z', strtotime($max . ' UTC') - OVERLAP_H * 3600)
-                : gmdate('Y-m-d\TH:i:s\Z', time() - START_DAGE * 86400);
-        }
-
-        $url = API . '?' . http_build_query([
-            'stationId'   => $st,
-            'parameterId' => $par,
-            'datetime'    => $fra . '/' . $til,
-            'limit'       => 300000,
-        ]);
-
-        try {
-            $json = hentJson($url);
-        } catch (Throwable $e) {
-            logmsg("FEJL $st/$par: " . $e->getMessage());
-            continue;
+                : gmdate('Y-m-d\TH:i:s\Z', time() - START_DAGE * 86400), '..']];
         }
 
         $n = 0;
         $maks = null;
-        if (!$test) $pdo->beginTransaction();
-        foreach ($json['features'] as $f) {
-            $p = $f['properties'];
-            if (!isset($p['value'], $p['observed'])) continue;
-            $row = [
-                ':s'  => $p['stationId'],
-                ':p'  => $p['parameterId'],
-                ':o'  => gmdate('Y-m-d H:i:s', strtotime($p['observed'])),
-                ':v'  => $p['value'],
-                ':qs' => $p['qcStatus'] ?? null,
-                ':qr' => $p['qcResult'] ?? null,
-            ];
-            if ($maks === null || $p['value'] > $maks[0]) $maks = [$p['value'], $p['observed']];
-            if ($test) {
-                if ($n < 3) echo '  ', implode(' | ', $row), PHP_EOL;
-            } else {
-                $upsert->execute($row);
-            }
-            $n++;
-        }
-        if (!$test) $pdo->commit();
+        foreach ($stykker as [$fra, $til]) {
+            $url = API . '?' . http_build_query([
+                'stationId'   => $st,
+                'parameterId' => $par,
+                'datetime'    => $fra . '/' . $til,
+                'limit'       => 300000,
+            ]);
 
-        logmsg(sprintf('%s/%-10s %5d rækker fra %s%s', $st, $par, $n, $fra,
-            $til !== '..' ? " til $til" : '') . ($maks ? sprintf('  (maks %s kl. %s UTC)', $maks[0], $maks[1]) : ''));
+            try {
+                $json = hentJson($url);
+            } catch (Throwable $e) {
+                logmsg("FEJL $st/$par $fra: " . $e->getMessage());
+                continue;
+            }
+
+            if (!$test) $pdo->beginTransaction();
+            foreach ($json['features'] as $f) {
+                $p = $f['properties'];
+                if (!isset($p['value'], $p['observed'])) continue;
+                $row = [
+                    ':s'  => $p['stationId'],
+                    ':p'  => $p['parameterId'],
+                    ':o'  => gmdate('Y-m-d H:i:s', strtotime($p['observed'])),
+                    ':v'  => $p['value'],
+                    ':qs' => $p['qcStatus'] ?? null,
+                    ':qr' => $p['qcResult'] ?? null,
+                ];
+                if (!isset($p['qcResult']) && ($maks === null || $p['value'] > $maks[0])) {
+                    $maks = [$p['value'], $p['observed']];
+                }
+                if ($test) {
+                    if ($n < 3) echo '  ', implode(' | ', $row), PHP_EOL;
+                } else {
+                    $upsert->execute($row);
+                }
+                $n++;
+            }
+            if (!$test) $pdo->commit();
+            if (count($stykker) > 1) {
+                logmsg(sprintf('  %s/%s %s: %d rækker', $st, $par, substr($fra, 0, 10), count($json['features'])));
+            }
+        }
+
+        [$forste, ] = $stykker[0];
+        [, $sidst]  = end($stykker);
+        logmsg(sprintf('%s/%-10s %7d rækker fra %s%s', $st, $par, $n, $forste,
+            $sidst !== '..' ? " til $sidst" : '') . ($maks ? sprintf('  (maks %s kl. %s UTC)', $maks[0], $maks[1]) : ''));
         $total += $n;
     }
 }
