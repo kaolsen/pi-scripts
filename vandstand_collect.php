@@ -37,7 +37,8 @@ if (isset($opt['fra'])) {
     $tz = new DateTimeZone('Europe/Copenhagen');
     $f  = DateTime::createFromFormat('!Y-m-d', $opt['fra'], $tz);
     $t  = DateTime::createFromFormat('!Y-m-d', $opt['til'] ?? $opt['fra'], $tz);
-    if (!$f || !$t) {
+    $gyldig = fn($d, $tekst) => $d && $d->format('Y-m-d') === $tekst;   // afviser fx 2023-13-01
+    if (!$gyldig($f, (string)$opt['fra']) || !$gyldig($t, (string)($opt['til'] ?? $opt['fra']))) {
         fwrite(STDERR, "Brug datoformat ÅÅÅÅ-MM-DD, fx --fra=2023-10-19 --til=2023-10-22\n");
         exit(1);
     }
