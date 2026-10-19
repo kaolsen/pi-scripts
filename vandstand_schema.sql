@@ -29,6 +29,19 @@ INSERT INTO vandstand_station (station_id, navn, lat, lon, afstand_km) VALUES
 ON DUPLICATE KEY UPDATE navn = VALUES(navn), lat = VALUES(lat),
                         lon = VALUES(lon), afstand_km = VALUES(afstand_km);
 
+-- Timemidler af rensede målinger (fejl og spidser udeladt). Bygges af
+-- vandstand_collect.php efter hver hentning; grafer over lange perioder og
+-- højvandshændelser regnes herfra.
+CREATE TABLE IF NOT EXISTS vandstand_time (
+    station_id VARCHAR(10)  NOT NULL,
+    time_utc   DATETIME     NOT NULL COMMENT 'Timens start, UTC',
+    cm         DECIMAL(6,1) NOT NULL COMMENT 'Timemiddel, cm over DVR90',
+    antal      SMALLINT     NOT NULL COMMENT 'Antal gyldige målinger i timen',
+    PRIMARY KEY (station_id, time_utc),
+    KEY idx_tid (time_utc),
+    KEY idx_cm (cm)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 -- Højvandshændelser: genberegnes hver nat af vandstand_haendelser.php
 -- (timer hvor Rødbyhavn eller Gedser har timemiddel >= 60 cm; < 24 t pause = samme storm)
 CREATE TABLE IF NOT EXISTS vandstand_haendelser (
