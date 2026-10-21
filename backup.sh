@@ -36,6 +36,12 @@ RETAIN_LOCAL_MONTHLY=62   # 2 måneder lokalt – skyen har 8
 # Nødknap-fil — opret denne fil for at stoppe scriptet
 STOP_FILE="$BACKUP_DIR/STOP"
 
+# Statusfiler til sundhedsdashboardet
+#   last_success: skrives KUN når hele backuppen er gået fejlfrit igennem
+#   last_status:  skrives altid ved afslutning (OK / FEJL / AFBRUDT + tidspunkt)
+SUCCESS_FILE="$BACKUP_DIR/last_success"
+STATUS_FILE="$BACKUP_DIR/last_status"
+
 ############################
 # STATS-MODUL
 ############################
@@ -53,6 +59,7 @@ source /home/kao/scripts/backup_stats.sh
 DUMP_PROFILE="drift"
 DB_INI="/etc/itkur/db.ini"
 MYCNF=$(mktemp)            # oprettes med rettigheder 600
+trap 'rm -f "$MYCNF"' EXIT # fjern login-filen uanset hvordan scriptet slutter
 {
     echo "[client]"
     echo "host=$(_ini_get "$DB_INI" "$DUMP_PROFILE" host)"
@@ -103,6 +110,7 @@ check_stop() {
         stats_end_run 2>/dev/null
         rm -f "$MYCNF"
         log "=== Backup afbrudt via nødknap ==="
+        echo "AFBRUDT $(date '+%Y-%m-%d %H:%M:%S')" > "$STATUS_FILE"
         exit 1
     fi
 }
@@ -301,8 +309,11 @@ stats_end_run
 rm -f "$MYCNF"
 
 if [ $ERROR -eq 0 ]; then
+    date '+%Y-%m-%d %H:%M:%S' > "$SUCCESS_FILE"
+    echo "OK $(date '+%Y-%m-%d %H:%M:%S')" > "$STATUS_FILE"
     log "=== Backup færdig OK ==="
 else
+    echo "FEJL $(date '+%Y-%m-%d %H:%M:%S')" > "$STATUS_FILE"
     log "=== Backup afsluttet med FEJL ==="
 fi
 
